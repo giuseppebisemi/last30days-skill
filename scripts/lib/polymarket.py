@@ -1,7 +1,7 @@
 """Polymarket prediction market search via Gamma API (free, no auth required).
 
 Uses gamma-api.polymarket.com for event/market discovery.
-No API key needed - public read-only API with generous rate limits (350 req/10s).
+No API key needed - public read-only API with generous rate limits (15K req/10s).
 """
 
 import json

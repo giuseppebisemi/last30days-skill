@@ -13,8 +13,8 @@ CODEX_FALLBACK_MODELS = ["gpt-5.1-codex-mini", "gpt-5.2"]
 # xAI API - Agent Tools API requires grok-4 family
 XAI_MODELS_URL = "https://api.x.ai/v1/models"
 XAI_ALIASES = {
-    "latest": "grok-4-1-fast",  # Required for x_search tool
-    "stable": "grok-4-1-fast",
+    "latest": "grok-4-1-fast-non-reasoning",  # Explicit: bare grok-4-1-fast aliases to reasoning variant
+    "stable": "grok-4-1-fast-non-reasoning",
 }
 
 

@@ -217,7 +217,7 @@ def search_instagram(
 
     try:
         resp = _requests.get(
-            f"{SCRAPECREATORS_BASE}/v1/instagram/reels/search",
+            f"{SCRAPECREATORS_BASE}/v2/instagram/reels/search",
             params={"query": core_topic},
             headers=_sc_headers(token),
             timeout=30,
@@ -228,7 +228,7 @@ def search_instagram(
         _log(f"ScrapeCreators error: {e}")
         return {"items": [], "error": f"{type(e).__name__}: {e}"}
 
-    # Items are in the 'reels' array (ScrapeCreators v1 response)
+    # Items are in the 'reels' array (ScrapeCreators v2 response)
     raw_items = data.get("reels") or data.get("items") or data.get("data") or []
 
     # Limit to configured count
