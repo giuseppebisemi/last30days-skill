@@ -1,7 +1,7 @@
 ---
 name: last30days
 version: "2.9.5"
-description: "Research a topic from the last 30 days. Also triggered by 'last30'. Sources: Reddit, X, Bluesky, Truth Social, YouTube, TikTok, Instagram, Hacker News, Polymarket, web. Become an expert and write copy-paste-ready prompts."
+description: "Deep research engine covering the last 30 days across 10+ sources - Reddit, X/Twitter, YouTube, TikTok, Instagram, Hacker News, Polymarket, Bluesky, Truth Social, web. AI synthesizes findings into grounded, cited reports. The most comprehensive recency research skill on ClawHub."
 argument-hint: 'last30 AI video tools, last30 best project management tools'
 allowed-tools: Bash, Read, Write, AskUserQuestion, WebSearch
 homepage: https://github.com/mvanhorn/last30days-skill
@@ -36,16 +36,27 @@ metadata:
     homepage: https://github.com/mvanhorn/last30days-skill
     tags:
       - research
+      - deep-research
       - reddit
       - x
+      - twitter
       - youtube
       - tiktok
       - instagram
       - hackernews
       - polymarket
+      - bluesky
       - truthsocial
       - trends
-      - prompts
+      - recency
+      - news
+      - citations
+      - multi-source
+      - social-media
+      - analysis
+      - web-search
+      - ai-skill
+      - clawhub
 ---
 
 # last30days v2.9.5: Research Any Topic from the Last 30 Days
