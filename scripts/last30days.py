@@ -33,6 +33,11 @@ def ensure_supported_python(version_info: tuple[int, int, int] | object | None =
 
 ensure_supported_python()
 
+if os.name == "nt":
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
 SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -103,7 +108,7 @@ def save_output(report: schema.Report, emit: str, save_dir: str, suffix: str = "
         content = emit_output(report, emit)
     else:
         content = render.render_full(report)
-    out_path.write_text(content)
+    out_path.write_text(content, encoding="utf-8")
     return out_path
 
 

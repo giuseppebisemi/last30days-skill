@@ -579,6 +579,8 @@ def get_x_source_status(config: dict[str, Any]) -> dict[str, Any]:
     """
     from . import bird_x
 
+    if config.get('AUTH_TOKEN') and config.get('CT0'):
+        bird_x.set_credentials(config.get('AUTH_TOKEN'), config.get('CT0'))
     bird_status = bird_x.get_bird_status()
     xai_available = bool(config.get('XAI_API_KEY'))
 
