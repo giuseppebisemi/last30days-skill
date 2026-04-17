@@ -6,8 +6,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+SKILL_MD_PATH = ROOT / "skills" / "last30days" / "SKILL.md"
+
+
 def _skill_version() -> str:
-    text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+    text = SKILL_MD_PATH.read_text(encoding="utf-8")
     match = re.search(r'^version:\s*"([^"]+)"\s*$', text, re.MULTILINE)
     if not match:
         raise AssertionError("SKILL.md version frontmatter not found")
@@ -16,7 +19,7 @@ def _skill_version() -> str:
 
 class TestVersionConsistency(unittest.TestCase):
     def test_root_skill_header_matches_frontmatter_version(self) -> None:
-        text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        text = SKILL_MD_PATH.read_text(encoding="utf-8")
         version = _skill_version()
         self.assertIn(f"# last30days v{version}:", text)
 

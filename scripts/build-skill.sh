@@ -19,11 +19,16 @@ mkdir -p dist
 OUT="dist/last30days.skill"
 git archive --format=zip --prefix=last30days/ --output="$OUT" HEAD
 
-# claude.ai's .skill bundle only needs the root SKILL.md + scripts/ runtime.
-# Claude Code needs skills/ and .claude-plugin/ in the git archive
-# (that's why they're NOT in .gitattributes export-ignore), but the .skill
-# bundle must strip them to keep a single canonical SKILL.md and stay under
-# the 200-file cap.
+# claude.ai's .skill bundle expects SKILL.md at bundle root + scripts/ runtime.
+# The canonical SKILL.md lives at skills/last30days/SKILL.md (Claude Code plugin
+# convention). Promote it to bundle root, then strip the Claude Code plugin tree
+# so the bundle stays under the 200-file cap and has exactly one SKILL.md.
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/last30days"
+git show HEAD:skills/last30days/SKILL.md > "$WORK/last30days/SKILL.md"
+(cd "$WORK" && zip -q "$REPO_ROOT/$OUT" "last30days/SKILL.md")
+
 zip -d "$OUT" "last30days/skills/*" "last30days/.claude-plugin/*" > /dev/null 2>&1 || true
 
 COUNT=$(unzip -l "$OUT" | tail -1 | awk '{print $2}')

@@ -7,7 +7,8 @@ Python scripts with multi-source search aggregation.
 - `scripts/last30days.py` — main research engine
 - `scripts/lib/` — search, enrichment, rendering modules
 - `scripts/lib/vendor/bird-search/` — vendored X search client
-- `SKILL.md` — skill definition (deployed to ~/.claude/skills/last30days/)
+- `skills/last30days/SKILL.md` — user-invocable skill definition (canonical Claude Code plugin path)
+- `skills/last30days-v3-spec/SKILL.md` — internal v3 runtime pipeline spec (not user-invocable)
 
 ## Commands
 ```bash

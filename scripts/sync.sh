@@ -66,7 +66,7 @@ sync_target() {
 }
 
 for t in "${COMMON_TARGETS[@]}"; do
-  sync_target "$t" "$SRC/SKILL.md"
+  sync_target "$t" "$SRC/skills/last30days/SKILL.md"
 done
 
 # Hermes sync: deploy to Hermes skills directory if it exists
@@ -80,7 +80,7 @@ if [ -d "$HOME/.hermes/skills/research" ]; then
   if [ -f "$SRC/.hermes-plugin/SKILL.md" ]; then
     cp "$SRC/.hermes-plugin/SKILL.md" "$HERMES_TARGET/SKILL.md"
   else
-    cp "$SRC/SKILL.md" "$HERMES_TARGET/SKILL.md"
+    cp "$SRC/skills/last30days/SKILL.md" "$HERMES_TARGET/SKILL.md"
   fi
   
   rsync -a \
