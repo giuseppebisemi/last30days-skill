@@ -433,6 +433,28 @@ class PlannerV3Tests(unittest.TestCase):
             self.assertNotIn("polymarket", all_sources,
                              f"polymarket should be excluded from {expected_intent}")
 
+    def test_explicit_requested_sources_survive_intent_routing(self):
+        """--search sources are a user override at default/deep depth too."""
+        for topic, requested, expected_intent in [
+            ("will the fed cut rates in december", ["hackernews", "polymarket"], "concept"),
+            ("how to deploy on Fly.io", ["reddit", "youtube", "polymarket", "stocktwits"], "how_to"),
+        ]:
+            for depth in ("default", "deep"):
+                with self.subTest(topic=topic, depth=depth):
+                    plan = planner.plan_query(
+                        topic=topic,
+                        available_sources=requested,
+                        requested_sources=requested,
+                        depth=depth,
+                        provider=None,
+                        model=None,
+                    )
+                    self.assertEqual(expected_intent, plan.intent)
+                    all_sources = set()
+                    for subquery in plan.subqueries:
+                        all_sources.update(subquery.sources)
+                    self.assertEqual(set(requested), all_sources)
+
     def test_opinion_includes_polymarket(self):
         """Polymarket should not be excluded from opinion intent plans."""
         plan = planner.plan_query(
@@ -615,11 +637,12 @@ class FallbackDefaultsTests(unittest.TestCase):
         # The old misleading phrasing must NOT appear.
         self.assertNotIn("No --plan and no LLM provider configured", output)
 
-    def test_fallback_does_not_log_new_warning_when_provider_present(self):
+    def test_provider_failure_logs_error_and_law7_reminder(self):
         # When a provider is configured, the provider path runs; if it
-        # errors, we get the "LLM planning failed" message, NOT the
-        # "No --plan passed" guidance (which is specifically for the
-        # no-provider-no-plan caller path).
+        # errors, we get the "LLM planning failed" message AND the
+        # "No --plan passed" guidance: a failed internal planner degrades
+        # the run exactly like having none, and the host may not be
+        # detectable (see test_law7_host_plan_gate.py).
         import io
         import contextlib
         buf = io.StringIO()
@@ -639,7 +662,7 @@ class FallbackDefaultsTests(unittest.TestCase):
             )
         output = buf.getvalue()
         self.assertIn("LLM planning failed", output)
-        self.assertNotIn("No --plan passed", output)
+        self.assertIn("No --plan passed", output)
 
 if __name__ == "__main__":
     unittest.main()

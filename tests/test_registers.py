@@ -208,9 +208,12 @@ def test_default_register_is_byte_identical_when_omitted(monkeypatch):
     assert hashlib.sha256(implicit.encode()).hexdigest() == (
         # Hash includes #886's linked evidence URLs, #890's Hacker News
         # comment-rendering changes, the quiet footer (no outcome text, no
-        # ## Source Errors in compact), the comments pool reading every
-        # floor-clearing cluster, and #706's fenced text footer.
-        "e00edc0a241c23fd9ebd49c2dfb9af452da85dada19cb8896bf5c76fcdc30c45"
+        # ## Source Errors in compact), and the comments pool reading every
+        # floor-clearing cluster, and the canonical boundary's inline-citation
+        # wording (no tool-contract override claim), and HN cluster-evidence
+        # comment lines carrying the comment's own link, and #706's fenced
+        # text footer.
+        "6c61772d662e1214b3fed20d6371ed14f61773b6af9c072225d9a2ede139878a"
     )
 
 
@@ -269,7 +272,7 @@ def test_registers_do_not_shape_comparison_output():
 @pytest.mark.parametrize(
     "topic",
     [
-        "alpha/beta",
+        "React/Vue",
         "alpha compared to beta",
         "difference between alpha and beta",
     ],
@@ -280,6 +283,17 @@ def test_registers_use_canonical_comparison_detection(topic):
     assert cli._audience_register_for_run(
         args, {"LAST30DAYS_REGISTER": "board"}, None
     ).name == "default"
+
+
+@pytest.mark.parametrize("topic", ["CI/CD", "alpha/beta", "https://example.com"])
+def test_slash_topics_keep_single_topic_register_selection(topic):
+    args = cli.build_parser().parse_args([topic])
+
+    assert cli._audience_register_for_run(
+        args, {"LAST30DAYS_REGISTER": "creator"}, None
+    ).name == "creator"
+    with pytest.raises(ValueError, match="unknown audience register 'board'"):
+        cli._audience_register_for_run(args, {"LAST30DAYS_REGISTER": "board"}, None)
 
 
 def test_registered_html_excludes_source_failure_diagnostics():
