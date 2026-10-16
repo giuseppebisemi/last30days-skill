@@ -2012,9 +2012,7 @@ def render_full(report: schema.Report, save_path: str | None = None) -> str:
     lines.extend(_render_stats(evidence_report))
     lines.extend(_render_source_coverage(evidence_report))
     if save_path:
-        footer_lines = _render_emoji_footer(evidence_report, save_path)
-        if footer_lines:
-            lines.extend(["", *footer_lines])
+        _append_pass_through_footer(lines, _render_emoji_footer(evidence_report, save_path))
     return "\n".join(lines).strip() + "\n"
 
 
