@@ -555,10 +555,13 @@ def expand_youtube_queries(topic: str, depth: str) -> List[str]:
     if depth == "deep":
         queries.append(f"{core} full OR complete OR official")
 
-    # Cap by depth budget
+    return queries[:youtube_query_cap(depth)]
+
+
+def youtube_query_cap(depth: str) -> int:
+    """How many sequential yt-dlp searches one entity issues at this depth."""
     caps = {"quick": 1, "default": 2, "deep": 3}
-    cap = caps.get(depth, 2)
-    return queries[:cap]
+    return caps.get(depth, caps["default"])
 
 
 # Freshness modes where an out-of-window video is noise, not a fallback: a

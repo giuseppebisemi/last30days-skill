@@ -1,0 +1,1 @@
+A deep comparison no longer records every YouTube result as a timeout. The YouTube wait grows with depth, how many entities share the yt-dlp gate, and that gate's slot limit. A YouTube timeout no longer says to update yt-dlp when the binary is already installed.

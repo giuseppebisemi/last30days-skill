@@ -34,6 +34,7 @@ from . import (
     dripstack,
     entity_extract,
     env,
+    fanout,
     fetch_memo,
     github,
     grok_x,
@@ -146,7 +147,13 @@ STREAM_ARTIFACT_LIFT_KEYS: tuple[str, ...] = ("meta_ads_page", "meta_ads_tally")
 # a hung lane degrades to a TIMEOUT partial instead of stalling run() forever.
 # Worst case per stream is one timeout ceiling (+ one inline 5xx retry in the
 # main fan-out, itself bounded by the lane's own timeouts); no new config knobs.
+# YouTube is the exception: a deep comparison shares two yt-dlp slots across
+# several sequential searches, so its wait is derived in
+# _youtube_stream_budget_seconds. Other lanes keep this cap.
 STREAM_FUTURE_TIMEOUT_SECONDS = 180.0
+# A search that finishes on the deadline is still pending when the waiter
+# checks monotonic() >= deadline. This margin lets that last result publish.
+_YOUTUBE_STREAM_SLACK_SECONDS = 5.0
 DISCOVERY_FUTURE_TIMEOUT_SECONDS = 60.0
 THIN_RETRY_FUTURE_TIMEOUT_SECONDS = 120.0
 # One X source, ordered backends: grok (up to 240s/call) + xai (90-180s) would
@@ -176,16 +183,55 @@ def _check_research(config: dict[str, Any]) -> None:
         raise TimeoutError("research budget exhausted or cancelled")
 
 
-def _wait_for_research(futures, config: dict[str, Any]):
+def _wait_for_research(futures, config: dict[str, Any], *, until: float | None = None):
+    """Wait until every future finishes, the config deadline hits, or ``until``.
+
+    ``until`` ends this wait without treating a later config deadline as
+    expired. The YouTube lane uses it so other sources still stop at the
+    fixed stream cap while YouTube keeps the longer shared-gate budget.
+    """
     pending = set(futures)
     done = set()
     while pending and not _research_stopped(config):
-        remaining = config["_research_deadline"] - time.monotonic()
+        now = time.monotonic()
+        if until is not None and now >= until:
+            break
+        remaining = config["_research_deadline"] - now
+        if until is not None:
+            remaining = min(remaining, until - now)
+        if remaining <= 0:
+            break
         completed, pending = futures_wait(
             pending, timeout=max(0, min(0.1, remaining)), return_when=FIRST_COMPLETED,
         )
         done.update(completed)
     return done, pending
+
+
+def _youtube_stream_budget_seconds(config: dict[str, Any], depth: str) -> float:
+    """Wall-clock budget for one YouTube stream under the shared yt-dlp gate.
+
+    Deep mode runs several searches per entity, and a comparison runs several
+    entities at once. They share ``youtube_yt._YTDLP_MAX_CONCURRENT`` slots, so
+    a fixed per-future cap cuts the queue off before any entity finishes. The
+    budget is the number of serialized waves times one entity's search time.
+    Shorter workloads keep the ordinary stream cap. ``LAST30DAYS_YT_SEARCH_TIMEOUT``
+    already sizes each search, so it sizes this wait too.
+    """
+    raw_peers = config.get("_comparison_entity_count") or 1
+    try:
+        peers = int(raw_peers)
+    except (TypeError, ValueError):
+        peers = 1
+    peers = max(1, min(peers, fanout.MAX_PARALLEL_SUBRUNS))
+    queries = max(1, youtube_yt.youtube_query_cap(depth))
+    slots = max(1, int(youtube_yt._YTDLP_MAX_CONCURRENT))
+    per_entity = queries * youtube_yt._search_timeout()
+    waves = math.ceil(peers / slots)
+    derived = waves * per_entity
+    if derived > STREAM_FUTURE_TIMEOUT_SECONDS:
+        return derived + _YOUTUBE_STREAM_SLACK_SECONDS
+    return STREAM_FUTURE_TIMEOUT_SECONDS
 
 
 @contextlib.contextmanager
@@ -2671,8 +2717,39 @@ def run(
         if source in available and source != "corpus"
     )
     max_workers = _inner_max_workers(stream_count, internal_subrun=internal_subrun)
-    stream_config = dict(config)
-    stream_config["_research_deadline"] = _research_deadline(config, STREAM_FUTURE_TIMEOUT_SECONDS)
+    # Other lanes keep the fixed cap. YouTube's wait grows only when this run
+    # actually searches YouTube and the shared yt-dlp queue is longer than
+    # that cap. An inherited enrichment deadline still wins via _research_deadline.
+    base_seconds = STREAM_FUTURE_TIMEOUT_SECONDS
+    youtube_requested = any(
+        source == "youtube"
+        for subquery in plan.subqueries
+        for source in subquery.sources
+        if source in available and source != "corpus"
+    )
+    youtube_seconds = (
+        _youtube_stream_budget_seconds(config, depth) if youtube_requested else base_seconds
+    )
+    extend_youtube = youtube_seconds > base_seconds
+    base_deadline = _research_deadline(config, base_seconds)
+    youtube_deadline = (
+        _research_deadline(config, youtube_seconds) if extend_youtube else base_deadline
+    )
+    if extend_youtube and youtube_deadline <= base_deadline:
+        extend_youtube = False
+        youtube_seconds = base_seconds
+        youtube_deadline = base_deadline
+    other_config = dict(config)
+    other_config["_research_deadline"] = base_deadline
+    if extend_youtube:
+        youtube_config = dict(config)
+        youtube_config["_research_deadline"] = youtube_deadline
+    else:
+        youtube_config = other_config
+
+    def _lane_config(source: str) -> dict[str, Any]:
+        return youtube_config if source == "youtube" else other_config
+
     with _abandoning_executor(max_workers=max_workers) as executor:
         for subquery in plan.subqueries:
             for source in subquery.sources:
@@ -2719,7 +2796,7 @@ def run(
                         topic=topic,
                         subquery=subquery,
                         source=source,
-                        config=stream_config,
+                        config=_lane_config(source),
                         depth=depth,
                         date_range=(from_date, to_date),
                         runtime=runtime,
@@ -2739,19 +2816,41 @@ def run(
                     )
                 ] = (subquery, source)
 
-        # Bounded fan-out (reddit-lane futures_wait pattern): the whole Phase 1
-        # waits at most STREAM_FUTURE_TIMEOUT_SECONDS, so a hung lane degrades
-        # to a TIMEOUT partial instead of stalling run() forever. Worst case
-        # per stream is the wait ceiling plus, for a stream that failed fast
-        # with a 5xx while budget remained, one inline retry bounded by that
-        # lane's own timeouts. No retry starts after the wait timed out or
-        # the enrichment cancel fired.
-        done, not_done = _wait_for_research(futures, stream_config)
-        budget_expired = bool(not_done)
-        for future in not_done:
+        # Bounded fan-out (reddit-lane futures_wait pattern): a hung lane
+        # degrades to a TIMEOUT partial instead of stalling run() forever.
+        # Non-YouTube lanes stop at STREAM_FUTURE_TIMEOUT_SECONDS. YouTube
+        # keeps its derived budget so a deep comparison can finish, and that
+        # same deadline is what stops a straggler from spending further
+        # ScrapeCreators credit after the wait (#1315). One inline 5xx retry
+        # is allowed only while the lane's own deadline remains.
+        if extend_youtube:
+            done, not_done = _wait_for_research(
+                futures, youtube_config, until=base_deadline,
+            )
+        else:
+            done, not_done = _wait_for_research(futures, other_config)
+        timed_out: list[tuple[Any, float]] = []
+        if extend_youtube:
+            youtube_still = {}
+            for future in not_done:
+                _subquery, source = futures[future]
+                if source == "youtube":
+                    youtube_still[future] = futures[future]
+                else:
+                    timed_out.append((future, base_seconds))
+            if youtube_still:
+                more_done, still_late = _wait_for_research(youtube_still, youtube_config)
+                done.update(more_done)
+                for future in still_late:
+                    timed_out.append((future, youtube_seconds))
+        else:
+            for future in not_done:
+                timed_out.append((future, base_seconds))
+        budget_expired = bool(timed_out)
+        for future, seconds in timed_out:
             subquery, source = futures[future]
             future.cancel()
-            detail = f"{source} timed out after {STREAM_FUTURE_TIMEOUT_SECONDS:g}s"
+            detail = f"{source} timed out after {seconds:g}s"
             bundle.errors_by_source[source] = detail
             bundle.record_failure(source, health.TIMEOUT, detail, attempted=True)
         for future in done:
@@ -2772,23 +2871,24 @@ def run(
                 # timeouts plus the blocking sleep would run past the budget
                 # that just expired.
                 if _is_transient_error(exc):
-                    if budget_expired or _research_stopped(stream_config):
+                    lane_config = _lane_config(source)
+                    if budget_expired or _research_stopped(lane_config):
                         bundle.errors_by_source[source] = str(exc)
                         state, attempted = _classify_source_failure(exc)
                         bundle.record_failure(source, state, str(exc), attempted=attempted)
                         continue
-                    delay = min(3, max(0, stream_config["_research_deadline"] - time.monotonic()))
-                    cancel = stream_config.get("_enrich_cancel")
+                    delay = min(3, max(0, lane_config["_research_deadline"] - time.monotonic()))
+                    cancel = lane_config.get("_enrich_cancel")
                     if cancel is None:
                         time.sleep(delay)
                     else:
                         cancel.wait(delay)
                     try:
-                        _check_research(stream_config)
+                        _check_research(lane_config)
                         retry_future = executor.submit(
                             _retrieve_stream,
                             topic=topic, subquery=subquery, source=source,
-                            config=stream_config, depth=depth, date_range=(from_date, to_date),
+                            config=lane_config, depth=depth, date_range=(from_date, to_date),
                             runtime=runtime, mock=mock,
                             rate_limited_sources=rate_limited_sources,
                             rate_limit_lock=rate_limit_lock,
@@ -2803,7 +2903,7 @@ def run(
                             run_started=run_started,
                             freshness_mode=plan.freshness_mode,
                         )
-                        retry_done, _ = _wait_for_research([retry_future], stream_config)
+                        retry_done, _ = _wait_for_research([retry_future], lane_config)
                         if not retry_done:
                             retry_future.cancel()
                             raise TimeoutError("stream retry timed out")

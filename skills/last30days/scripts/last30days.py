@@ -4543,6 +4543,9 @@ def _main(
                 report.artifacts["resolved"] = resolved_effective
                 return report
 
+            # Comparison entities share the process-wide yt-dlp gate. Record
+            # the width so each run can budget YouTube for that queue.
+            config["_comparison_entity_count"] = 1 + len(discovered)
             entity_reports = fanout.run_competitor_fanout(
                 main_topic=topic,
                 main_runner=_main_runner,

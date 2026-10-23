@@ -398,10 +398,21 @@ def _build_nudge_text(
 
     if "youtube" in core_missing:
         if "youtube" in core_errored:
-            yt_fix = prescriptions.get("youtube", "ytdlp_stale")
-            free_suggestions.append(
-                f"YouTube errored - update yt-dlp: {yt_fix.fix_cli}"
-            )
+            yt_error = str(research_results.get("youtube_error") or "")
+            # A stream-budget timeout means the step did not finish. yt-dlp
+            # being installed is not evidence the binary is stale (#340, #676
+            # still cover a real degraded-transcript run below).
+            if http.classify_failure(message=yt_error) == health.TIMEOUT:
+                detail = yt_error.strip() or "the step ran out of time"
+                free_suggestions.append(
+                    "YouTube errored - the step ran out of time before it finished "
+                    f"({detail}). yt-dlp is installed; a timeout is not a stale binary."
+                )
+            else:
+                yt_fix = prescriptions.get("youtube", "ytdlp_stale")
+                free_suggestions.append(
+                    f"YouTube errored - update yt-dlp: {yt_fix.fix_cli}"
+                )
         else:
             yt_fix = prescriptions.get("youtube", "ytdlp_missing")
             free_suggestions.append(
