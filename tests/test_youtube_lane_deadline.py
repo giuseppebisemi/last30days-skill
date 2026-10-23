@@ -1,6 +1,7 @@
 """A YouTube lane that runs into the stream deadline keeps the videos it found."""
 
 import json
+import threading
 import time
 
 from lib import fetch_memo, health, pipeline, youtube_yt
@@ -41,6 +42,7 @@ def _search_payload(cmd, videos: int) -> str:
 def _run_lane(
     monkeypatch, *, transcript_seconds: float, later_search_seconds: float = 0.0,
     videos: int = 30, calls: dict | None = None, first_search_seconds: float = 0.0,
+    sc_key: bool = False,
 ):
     calls = {"search": 0, "transcript": 0} if calls is None else calls
 
@@ -57,10 +59,16 @@ def _run_lane(
             )
         return youtube_yt.subproc.SubprocResult(returncode=1, stdout="", stderr="")
 
+    released = threading.Event()
+
     def slow_transcript(video_id, *args, **kwargs):
         calls["transcript"] += 1
-        time.sleep(transcript_seconds)
+        released.wait(transcript_seconds)
         return f"{video_id} explains the comparison with specific numbers."
+
+    def paid_search(*args, **kwargs):
+        calls["sc_search"] = calls.get("sc_search", 0) + 1
+        return {"items": []}
 
     monkeypatch.setattr(pipeline, "STREAM_FUTURE_TIMEOUT_SECONDS", 3.0)
     monkeypatch.setattr(pipeline, "THIN_RETRY_FUTURE_TIMEOUT_SECONDS", 3.0)
@@ -70,12 +78,16 @@ def _run_lane(
     monkeypatch.setattr(youtube_yt.subproc, "run_with_timeout", fake_run)
     monkeypatch.setattr(youtube_yt, "fetch_transcript", slow_transcript)
     monkeypatch.setattr(youtube_yt, "enrich_with_comments", lambda items, token, **k: items)
+    monkeypatch.setattr(youtube_yt, "search_youtube_sc", paid_search)
+    config = {"EXCLUDE_SOURCES": "youtube_comments"}
+    if sc_key:
+        config["SCRAPECREATORS_API_KEY"] = "test-key"
     youtube_yt.reset_search_cache()
     fetch_memo.reset()
     try:
         report = pipeline.run(
             topic="Alpha",
-            config={"EXCLUDE_SOURCES": "youtube_comments"},
+            config=config,
             depth="deep",
             requested_sources=["youtube"],
             mock=False,
@@ -86,6 +98,7 @@ def _run_lane(
             internal_subrun=True,
         )
     finally:
+        released.set()
         youtube_yt.reset_search_cache()
         fetch_memo.reset()
     return report.source_status["youtube"]
@@ -120,6 +133,28 @@ def test_lane_with_no_videos_at_the_deadline_is_not_retried(monkeypatch):
 
     assert outcome.state == health.TIMEOUT, (outcome.state, outcome.detail)
     assert calls["search"] == 1, calls
+
+
+def test_out_of_time_lane_buys_no_scrapecreators_backfill(monkeypatch):
+    calls = {"search": 0, "transcript": 0}
+    outcome = _run_lane(monkeypatch, transcript_seconds=4.0, videos=1, calls=calls, sc_key=True)
+
+    assert outcome.state == health.PARTIAL, (outcome.state, outcome.detail)
+    assert calls.get("sc_search", 0) == 0, calls
+    assert calls["transcript"] == 1, calls
+
+
+def test_transcript_past_the_lane_deadline_buys_no_scrapecreators_rescue(monkeypatch, tmp_path):
+    paid = []
+    monkeypatch.setattr(youtube_yt, "_LANE_RETURN_MARGIN_SECONDS", 10.0, raising=False)
+    monkeypatch.setattr(youtube_yt, "is_ytdlp_installed", lambda: True)
+    monkeypatch.setattr(youtube_yt, "_ytdlp_ssh_host", lambda: None)
+    monkeypatch.setattr(youtube_yt, "_sc_fetch_transcript", lambda *a, **k: paid.append(a) or "bought")
+    with youtube_yt.sc_spend_until(lambda: False, deadline=time.monotonic() + 5):
+        transcript = youtube_yt.fetch_transcript("vid", str(tmp_path), {}, "test-key")
+
+    assert transcript is None
+    assert paid == []
 
 
 def test_lane_that_finishes_in_time_is_not_partial(monkeypatch):
