@@ -2474,6 +2474,7 @@ def run(
 
     bundle = schema.RetrievalBundle(artifacts={"grounding": []})
     deferred_retryable_failures: dict[str, dict[str, Any]] = {}
+    out_of_time_sources: set[str] = set()
     if envelope is not None:
         # The footer names the X provenance (render._render_stats).
         bundle.artifacts["x_provenance"] = envelope.provenance
@@ -2827,6 +2828,7 @@ def run(
                     source == "youtube"
                     and not raw_items
                     and _retryable_youtube_outcome(outcome_note)
+                    and not artifact.get("_source_out_of_time")
                 ):
                     deferred_retryable_failures.setdefault(source, outcome_note)
                 else:
@@ -2836,6 +2838,10 @@ def run(
                         outcome_note["detail"],
                         attempted=outcome_note.get("attempted", True),
                     )
+                # A lane that already ran out of time would only run out
+                # again in the thin-results retry or the transcript backfill.
+                if artifact.pop("_source_out_of_time", False):
+                    out_of_time_sources.add(source)
             if isinstance(artifact, dict) and artifact.get("_source_outcome_detail"):
                 artifact = dict(artifact)
                 detail_rate_limited = _detail_rate_limits_source(source, artifact)
@@ -3047,7 +3053,7 @@ def run(
     # source_status counts describe the same post-floor evidence set fusion sees.
     items_by_source = _finalize_items_by_source(
         bundle.items_by_source, topic=topic, config=config, depth=depth, mock=mock,
-        elapsed=time.monotonic() - run_started,
+        elapsed=time.monotonic() - run_started, out_of_time=out_of_time_sources,
     )
     retained_markets = {
         source_item_key(item) for item in items_by_source.get("polymarket", [])
@@ -3633,6 +3639,7 @@ def _finalize_items_by_source(
     depth: str = "default",
     mock: bool = False,
     elapsed: float = 0.0,
+    out_of_time: set[str] | None = None,
 ) -> dict[str, list[schema.SourceItem]]:
     finalized = {}
     for source, items in items_by_source_raw.items():
@@ -3649,7 +3656,7 @@ def _finalize_items_by_source(
             "topic": topic,
             "depth": depth,
         }
-        if source == "youtube" and items and not mock:
+        if source == "youtube" and items and not mock and source not in (out_of_time or ()):
             # Same budget-at-the-survivors principle as the digg branch
             # below: retrieval-time transcripts go to each search's
             # top-by-views candidates, while final selection ranks by
@@ -5635,6 +5642,15 @@ def _fetch_youtube_stream_live(
                 "_source_outcome_deferred": outcome["_source_outcome"],
             }
         return items, outcome
+    out_of_time = (result or {}).get("out_of_time")
+    if out_of_time:
+        detail = f"youtube timed out: {out_of_time}"
+        if youtube_failure:
+            detail += f"; {youtube_failure}"
+        return items, {
+            **_outcome_artifact(health.TIMEOUT, detail),
+            "_source_out_of_time": True,
+        }
     if youtube_failure:
         state = youtube_yt.classify_run_failure(youtube_failure)
         attempted = state != schema.SKIPPED_UNCONFIGURED
