@@ -1,0 +1,130 @@
+"""A YouTube lane that runs into the stream deadline keeps the videos it found."""
+
+import json
+import time
+
+from lib import fetch_memo, health, pipeline, youtube_yt
+
+
+def _plan(topic: str) -> dict:
+    return {
+        "intent": "comparison",
+        "freshness_mode": "balanced_recent",
+        "cluster_mode": "story",
+        "subqueries": [{
+            "label": "primary",
+            "search_query": topic,
+            "ranking_query": topic,
+            "sources": ["youtube"],
+            "weight": 1.0,
+        }],
+        "source_weights": {"youtube": 1.0},
+    }
+
+
+def _search_payload(cmd, videos: int) -> str:
+    query = next(str(part) for part in cmd if "ytsearch" in str(part))
+    slug = query.split(":", 1)[-1]
+    return "\n".join(
+        json.dumps({
+            "id": f"video-{n:02d}",
+            "title": f"Alpha video {n}",
+            "description": slug,
+            "channel": "Desk",
+            "view_count": 1000 + n,
+            "upload_date": "20261015",
+        })
+        for n in range(videos)
+    ) + "\n"
+
+
+def _run_lane(
+    monkeypatch, *, transcript_seconds: float, later_search_seconds: float = 0.0,
+    videos: int = 30, calls: dict | None = None, first_search_seconds: float = 0.0,
+):
+    calls = {"search": 0, "transcript": 0} if calls is None else calls
+
+    def fake_run(cmd, timeout=120, **kwargs):
+        if any("ytsearch" in str(part) for part in cmd):
+            calls["search"] += 1
+            slow = first_search_seconds if calls["search"] == 1 else later_search_seconds
+            if slow:
+                time.sleep(min(slow, timeout))
+                if timeout < slow:
+                    raise youtube_yt.subproc.SubprocTimeout("search timed out")
+            return youtube_yt.subproc.SubprocResult(
+                returncode=0, stdout=_search_payload(cmd, videos), stderr="",
+            )
+        return youtube_yt.subproc.SubprocResult(returncode=1, stdout="", stderr="")
+
+    def slow_transcript(video_id, *args, **kwargs):
+        calls["transcript"] += 1
+        time.sleep(transcript_seconds)
+        return f"{video_id} explains the comparison with specific numbers."
+
+    monkeypatch.setattr(pipeline, "STREAM_FUTURE_TIMEOUT_SECONDS", 3.0)
+    monkeypatch.setattr(pipeline, "THIN_RETRY_FUTURE_TIMEOUT_SECONDS", 3.0)
+    monkeypatch.setattr(youtube_yt, "_LANE_RETURN_MARGIN_SECONDS", 1.0, raising=False)
+    monkeypatch.setattr(pipeline, "which", lambda cmd: "/usr/bin/yt-dlp" if cmd == "yt-dlp" else None)
+    monkeypatch.setattr(youtube_yt, "is_ytdlp_installed", lambda: True)
+    monkeypatch.setattr(youtube_yt.subproc, "run_with_timeout", fake_run)
+    monkeypatch.setattr(youtube_yt, "fetch_transcript", slow_transcript)
+    monkeypatch.setattr(youtube_yt, "enrich_with_comments", lambda items, token, **k: items)
+    youtube_yt.reset_search_cache()
+    fetch_memo.reset()
+    try:
+        report = pipeline.run(
+            topic="Alpha",
+            config={"EXCLUDE_SOURCES": "youtube_comments"},
+            depth="deep",
+            requested_sources=["youtube"],
+            mock=False,
+            external_plan=_plan("Alpha"),
+            web_backend="none",
+            lookback_days=30,
+            as_of_date="2026-10-23",
+            internal_subrun=True,
+        )
+    finally:
+        youtube_yt.reset_search_cache()
+        fetch_memo.reset()
+    return report.source_status["youtube"]
+
+
+def test_slow_transcripts_do_not_discard_found_videos(monkeypatch):
+    outcome = _run_lane(monkeypatch, transcript_seconds=5.0)
+
+    assert outcome.items_returned > 0, (outcome.state, outcome.detail)
+    assert outcome.state == health.PARTIAL, (outcome.state, outcome.detail)
+    assert "transcript" in (outcome.detail or "")
+
+
+def test_slow_search_is_cut_off_at_the_lane_deadline(monkeypatch):
+    outcome = _run_lane(monkeypatch, transcript_seconds=0.0, later_search_seconds=30.0)
+
+    assert outcome.items_returned > 0, (outcome.state, outcome.detail)
+    assert outcome.state != health.TIMEOUT, (outcome.state, outcome.detail)
+
+
+def test_out_of_time_lane_does_no_more_youtube_work(monkeypatch):
+    calls = {"search": 0, "transcript": 0}
+    outcome = _run_lane(monkeypatch, transcript_seconds=4.0, videos=1, calls=calls)
+
+    assert outcome.state == health.PARTIAL, (outcome.state, outcome.detail)
+    assert calls["transcript"] == 1, calls
+
+
+def test_lane_with_no_videos_at_the_deadline_is_not_retried(monkeypatch):
+    calls = {"search": 0, "transcript": 0}
+    outcome = _run_lane(monkeypatch, transcript_seconds=0.0, first_search_seconds=30.0, calls=calls)
+
+    assert outcome.state == health.TIMEOUT, (outcome.state, outcome.detail)
+    assert calls["search"] == 1, calls
+
+
+def test_lane_that_finishes_in_time_is_not_partial(monkeypatch):
+    outcome = _run_lane(monkeypatch, transcript_seconds=0.0)
+
+    assert outcome.items_returned > 0, (outcome.state, outcome.detail)
+    assert outcome.state != health.PARTIAL, (outcome.state, outcome.detail)
+    assert outcome.state != health.TIMEOUT, (outcome.state, outcome.detail)
