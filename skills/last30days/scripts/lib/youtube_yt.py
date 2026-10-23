@@ -1243,7 +1243,9 @@ def fetch_transcript(
     # the video was not proven caption-less, fall back to the SC transcript
     # endpoint (fetched server-side: no 429, cookies, or PO tokens). Returns
     # already-cleaned, word-capped plaintext.
-    if token and _should_try_sc_transcript(status):
+    # Past the lane deadline yt-dlp failed because it was not allowed to run,
+    # and nobody will read a transcript bought now.
+    if token and _should_try_sc_transcript(status) and not _lane_out_of_time():
         sc_transcript = _sc_fetch_transcript(video_id, token)
         if sc_transcript:
             # The keyless cascade (yt-dlp / direct HTTP) already logged its
@@ -1294,7 +1296,8 @@ def fetch_transcripts_parallel(
     statuses: Dict[str, Dict[str, Any]] = {vid: {} for vid in video_ids}
     unfinished: List[str] = []
     seconds_left = _lane_seconds_left()
-    with tempfile.TemporaryDirectory() as temp_dir:
+    # A yt-dlp child killed at the lane deadline can still be writing here.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
         executor = ThreadPoolExecutor(max_workers=max_workers)
         try:
             futures = {

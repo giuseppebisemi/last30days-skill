@@ -5551,7 +5551,8 @@ def _fetch_youtube_stream_live(
             result = None
             # Not an empty yt-dlp result: the process is exiting.
             run_over = _interpreter_shutting_down(exc)
-    run_over = run_over or _research_stopped(config)
+    out_of_time = (result or {}).get("out_of_time")
+    run_over = run_over or bool(out_of_time) or _research_stopped(config)
     free_items = list((result or {}).get("items") or [])
     min_items = env.youtube_sc_min_items(config)
     backfill_thin = bool(free_items) and len(free_items) < min_items
@@ -5630,7 +5631,7 @@ def _fetch_youtube_stream_live(
         result = {"items": []}
     # Enrich top videos with comments (default-on when a key is present).
     items = youtube_yt.parse_youtube_response(result)
-    if items and env.is_youtube_comments_available(config):
+    if items and env.is_youtube_comments_available(config) and not out_of_time:
         youtube_yt.enrich_with_comments(items, token=sc_token or "")
     if thin_detail:
         if not thin_error:
@@ -5642,7 +5643,6 @@ def _fetch_youtube_stream_live(
                 "_source_outcome_deferred": outcome["_source_outcome"],
             }
         return items, outcome
-    out_of_time = (result or {}).get("out_of_time")
     if out_of_time:
         detail = f"youtube timed out: {out_of_time}"
         if youtube_failure:
