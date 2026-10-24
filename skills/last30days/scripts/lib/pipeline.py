@@ -2953,6 +2953,7 @@ def run(
         first_party_handles=explicit_first_party,
         first_party_by_source=creator_first_party,
         run_started=run_started,
+        out_of_time_sources=out_of_time_sources,
     )
     for source, outcome in deferred_retryable_failures.items():
         if (
@@ -4904,8 +4905,12 @@ def _retry_thin_sources(
     first_party_handles: Iterable[str] | None = None,
     first_party_by_source: Mapping[str, Iterable[str]] | None = None,
     run_started: float | None = None,
+    out_of_time_sources: set[str] | None = None,
 ) -> None:
-    """Retry sources with thin results using simplified core subject query."""
+    """Retry sources with thin results using simplified core subject query.
+
+    Sources whose retry ran out of time are added to ``out_of_time_sources``.
+    """
     if depth == "quick":
         return
     # No new paid/network work after the enrichment budget expired.
@@ -4952,7 +4957,7 @@ def _retry_thin_sources(
 
     def _retry_one_source(
         source: str,
-    ) -> tuple[str, list[schema.SourceItem], dict[str, Any] | None]:
+    ) -> tuple[str, list[schema.SourceItem], dict[str, Any] | None, tuple, bool]:
         raw_items, artifact = _retrieve_stream(
             topic=topic,
             subquery=retry_subquery,
@@ -4980,6 +4985,7 @@ def _retry_thin_sources(
         outcome_note = artifact.get("_source_outcome") if isinstance(artifact, dict) else None
         detail_note = artifact.get("_source_outcome_detail") if isinstance(artifact, dict) else None
         detail_state = artifact.get("_source_outcome_detail_state") if isinstance(artifact, dict) else None
+        out_of_time = isinstance(artifact, dict) and bool(artifact.get("_source_out_of_time"))
         normalized = _normalize_score_dedupe(
             source,
             raw_items,
@@ -4997,7 +5003,7 @@ def _retry_thin_sources(
             defer_relevance_prune=(source == "x"),
         )
         if source == "jobs":
-            return source, normalized, outcome_note, (detail_note, detail_state)
+            return source, normalized, outcome_note, (detail_note, detail_state), out_of_time
         normalized = _apply_reddit_stream_keepers(
             source, normalized, settings["per_stream_limit"], topic
         )
@@ -5005,7 +5011,7 @@ def _retry_thin_sources(
             outcome_note = outcome_note or artifact["_source_outcome_deferred"]
         if not normalized and isinstance(artifact, dict):
             outcome_note = outcome_note or artifact.get("_source_outcome_if_empty")
-        return source, normalized, outcome_note, (detail_note, detail_state)
+        return source, normalized, outcome_note, (detail_note, detail_state), out_of_time
 
     retryable = [s for s in thin_sources if s not in rate_limited_sources]
 
@@ -5021,7 +5027,9 @@ def _retry_thin_sources(
         for future in done:
             source = futures[future]
             try:
-                source, normalized, outcome_note, (detail_note, detail_state) = future.result(timeout=0)
+                (
+                    source, normalized, outcome_note, (detail_note, detail_state), out_of_time,
+                ) = future.result(timeout=0)
             except Exception as exc:
                 print(f"[Pipeline] Retry failed for {source}: {type(exc).__name__}: {exc}", file=sys.stderr)
                 state, attempted = _classify_source_failure(exc)
@@ -5032,6 +5040,8 @@ def _retry_thin_sources(
                     attempted=attempted,
                 )
                 continue
+            if out_of_time and out_of_time_sources is not None:
+                out_of_time_sources.add(source)
             try:
                 if outcome_note:
                     bundle.record_failure(
