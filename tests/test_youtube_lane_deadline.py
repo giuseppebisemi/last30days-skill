@@ -42,13 +42,15 @@ def _search_payload(cmd, videos: int) -> str:
 def _run_lane(
     monkeypatch, *, transcript_seconds: float, later_search_seconds: float = 0.0,
     videos: int = 30, calls: dict | None = None, first_search_seconds: float = 0.0,
-    sc_key: bool = False,
+    sc_key: bool = False, failing_first_searches: int = 0,
 ):
     calls = {"search": 0, "transcript": 0} if calls is None else calls
 
     def fake_run(cmd, timeout=120, **kwargs):
         if any("ytsearch" in str(part) for part in cmd):
             calls["search"] += 1
+            if calls["search"] <= failing_first_searches:
+                raise youtube_yt.subproc.SubprocTimeout("search timed out")
             slow = first_search_seconds if calls["search"] == 1 else later_search_seconds
             if slow:
                 time.sleep(min(slow, timeout))
@@ -173,6 +175,17 @@ def test_lane_whose_transcripts_all_fail_at_the_deadline_is_out_of_time(monkeypa
 
     assert result["items"], result
     assert result.get("out_of_time"), result
+
+
+def test_retry_that_runs_out_of_time_does_no_more_youtube_work(monkeypatch):
+    calls = {"search": 0, "transcript": 0}
+    outcome = _run_lane(
+        monkeypatch, transcript_seconds=4.0, videos=1, calls=calls, failing_first_searches=3,
+    )
+
+    assert calls["search"] > 3, calls
+    assert outcome.state == health.PARTIAL, (outcome.state, outcome.detail)
+    assert calls["transcript"] == 1, calls
 
 
 def test_lane_that_finishes_in_time_is_not_partial(monkeypatch):
