@@ -1547,6 +1547,10 @@ def search_and_transcribe(
         cut.append(f"left {len(unfinished_ids)} of {len(candidate_ids)} transcript fetches unfinished")
     if cut:
         result["out_of_time"] = f"{' and '.join(cut)} to return before the stream deadline"
+    elif _lane_out_of_time():
+        # Transcript fetches that hit the deadline answer None instead of
+        # going missing, so the deadline itself is the signal.
+        result["out_of_time"] = "reached the stream deadline while fetching transcripts"
     return result
 
 
