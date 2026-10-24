@@ -157,6 +157,24 @@ def test_transcript_past_the_lane_deadline_buys_no_scrapecreators_rescue(monkeyp
     assert paid == []
 
 
+def test_lane_whose_transcripts_all_fail_at_the_deadline_is_out_of_time(monkeypatch):
+    def failed_at_deadline(video_ids, **kwargs):
+        while not youtube_yt._lane_out_of_time():
+            time.sleep(0.01)
+        return {vid: None for vid in video_ids}
+
+    monkeypatch.setattr(youtube_yt, "_LANE_RETURN_MARGIN_SECONDS", 0.0, raising=False)
+    monkeypatch.setattr(youtube_yt, "search_youtube", lambda *a, **k: {
+        "items": [{"video_id": "video-00", "engagement": {"views": 1000}}],
+    })
+    monkeypatch.setattr(youtube_yt, "fetch_transcripts_parallel", failed_at_deadline)
+    with youtube_yt.sc_spend_until(lambda: False, deadline=time.monotonic() + 0.5):
+        result = youtube_yt.search_and_transcribe("Alpha", "2026-09-23", "2026-10-23")
+
+    assert result["items"], result
+    assert result.get("out_of_time"), result
+
+
 def test_lane_that_finishes_in_time_is_not_partial(monkeypatch):
     outcome = _run_lane(monkeypatch, transcript_seconds=0.0)
 
