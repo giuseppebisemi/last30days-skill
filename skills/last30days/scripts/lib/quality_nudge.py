@@ -403,8 +403,8 @@ def _build_nudge_text(
             # age, so it must not prescribe an upgrade.
             if http.classify_failure(message=yt_error) == health.TIMEOUT:
                 free_suggestions.append(
-                    f"YouTube errored - {yt_error}. yt-dlp is installed; "
-                    "this is a timeout, not a stale binary."
+                    f"YouTube timed out ({yt_error}) - this is a timeout, "
+                    "not a stale yt-dlp, so updating it won't help."
                 )
             else:
                 yt_fix = prescriptions.get("youtube", "ytdlp_stale")
