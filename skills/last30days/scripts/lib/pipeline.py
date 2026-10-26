@@ -5512,10 +5512,15 @@ def _fetch_youtube_stream(
     """Search, backfill, transcribe, and comment-enrich one YouTube query."""
     # An abandoned lane keeps running after the report is saved; once the
     # run is over, every ScrapeCreators call in it is wasted credit (#1315).
+    deadline = config.get("_research_deadline")
     with youtube_yt.sc_spend_until(
         lambda: _research_stopped(config),
         cancel=config.get("_enrich_cancel"),
-        deadline=config.get("_research_deadline"),
+        deadline=deadline,
+        return_deadline=(
+            deadline - youtube_yt._LANE_RETURN_MARGIN_SECONDS
+            if deadline is not None else None
+        ),
     ):
         return _fetch_youtube_stream_live(
             yt_query, from_date, to_date, depth, config,
@@ -5564,6 +5569,8 @@ def _fetch_youtube_stream_live(
             # Not an empty yt-dlp result: the process is exiting.
             run_over = _interpreter_shutting_down(exc)
     out_of_time = (result or {}).get("out_of_time")
+    if not out_of_time and youtube_yt._lane_out_of_time():
+        out_of_time = "lane deadline passed"
     run_over = run_over or bool(out_of_time) or _research_stopped(config)
     free_items = list((result or {}).get("items") or [])
     min_items = env.youtube_sc_min_items(config)
@@ -5643,8 +5650,20 @@ def _fetch_youtube_stream_live(
         result = {"items": []}
     # Enrich top videos with comments (default-on when a key is present).
     items = youtube_yt.parse_youtube_response(result)
+    if not out_of_time and youtube_yt._lane_out_of_time():
+        out_of_time = "lane deadline passed"
     if items and env.is_youtube_comments_available(config) and not out_of_time:
         youtube_yt.enrich_with_comments(items, token=sc_token or "")
+    if not out_of_time and youtube_yt._lane_out_of_time():
+        out_of_time = "lane deadline passed"
+    if out_of_time:
+        detail = f"youtube timed out: {out_of_time}"
+        if thin_detail or youtube_failure:
+            detail += f"; {thin_detail or youtube_failure}"
+        return items, {
+            **_outcome_artifact(health.TIMEOUT, detail),
+            "_source_out_of_time": True,
+        }
     if thin_detail:
         if not thin_error:
             return items, {"_source_outcome_detail": thin_detail}
@@ -5655,14 +5674,6 @@ def _fetch_youtube_stream_live(
                 "_source_outcome_deferred": outcome["_source_outcome"],
             }
         return items, outcome
-    if out_of_time:
-        detail = f"youtube timed out: {out_of_time}"
-        if youtube_failure:
-            detail += f"; {youtube_failure}"
-        return items, {
-            **_outcome_artifact(health.TIMEOUT, detail),
-            "_source_out_of_time": True,
-        }
     if youtube_failure:
         state = youtube_yt.classify_run_failure(youtube_failure)
         attempted = state != schema.SKIPPED_UNCONFIGURED

@@ -62,7 +62,7 @@ def reset_transcript_fetch_stats() -> None:
 # Max words to keep from each transcript
 TRANSCRIPT_MAX_WORDS = 5000
 
-from . import dates, health, http, log, subproc
+from . import bounded_get, dates, health, http, log, subproc
 from .query import infer_query_intent
 
 from .relevance import token_overlap_relevance as _compute_relevance
@@ -177,6 +177,7 @@ class _SCSpendLimit:
     stopped: Callable[[], bool]
     cancel: Optional[threading.Event] = None
     deadline: Optional[float] = None
+    return_deadline: Optional[float] = None
 
 
 _sc_spend_limit: contextvars.ContextVar[Optional[_SCSpendLimit]] = (
@@ -190,13 +191,15 @@ def sc_spend_until(
     *,
     cancel: Optional[threading.Event] = None,
     deadline: Optional[float] = None,
+    return_deadline: Optional[float] = None,
 ) -> Iterator[None]:
     """Refuse ScrapeCreators YouTube calls in this context once ``stopped()``.
 
     ``cancel`` and ``deadline`` (monotonic) also cut off a request, or its
-    retries, that is still running when the run ends.
+    retries, that is still running when the run ends. A lane can supply an
+    earlier ``return_deadline`` to preserve time for handing back its results.
     """
-    token = _sc_spend_limit.set(_SCSpendLimit(stopped, cancel, deadline))
+    token = _sc_spend_limit.set(_SCSpendLimit(stopped, cancel, deadline, return_deadline))
     try:
         yield
     finally:
@@ -208,12 +211,22 @@ def sc_spend_until(
 _LANE_RETURN_MARGIN_SECONDS = 10.0
 
 
+def _lane_deadline() -> Optional[float]:
+    limit = _sc_spend_limit.get()
+    if limit is None:
+        return None
+    deadline = limit.return_deadline
+    if deadline is None:
+        if limit.deadline is None:
+            return None
+        deadline = limit.deadline - _LANE_RETURN_MARGIN_SECONDS
+    return deadline
+
+
 def _lane_seconds_left() -> Optional[float]:
     """Seconds until this lane must return its results, or None if unbounded."""
-    limit = _sc_spend_limit.get()
-    if limit is None or limit.deadline is None:
-        return None
-    return limit.deadline - _LANE_RETURN_MARGIN_SECONDS - time.monotonic()
+    deadline = _lane_deadline()
+    return None if deadline is None else deadline - time.monotonic()
 
 
 def _lane_out_of_time() -> bool:
@@ -222,11 +235,14 @@ def _lane_out_of_time() -> bool:
 
 
 def _sc_spend_blocked(what: str) -> bool:
-    """True (and logged) when the run is over and ``what`` must not be paid for."""
+    """True when research stopped or the lane must return before buying ``what``."""
     limit = _sc_spend_limit.get()
-    if limit is None or not limit.stopped():
+    if limit is None:
         return False
-    _log(f"Skipping ScrapeCreators {what}: the research run is over")
+    lane_expired = limit.return_deadline is not None and time.monotonic() >= limit.return_deadline
+    if not limit.stopped() and not lane_expired:
+        return False
+    _log(f"Skipping ScrapeCreators {what}: the research stopped or the lane deadline passed")
     return True
 
 
@@ -234,11 +250,15 @@ def _sc_request_bounds(deadline: Optional[float] = None) -> Dict[str, Any]:
     """``http.get`` kwargs that stop a paid request when the research run ends.
 
     ``deadline`` is the caller's own monotonic deadline, if any; the earlier
-    of it and the run's deadline wins.
+    of it, the run's deadline, and the lane's return deadline wins.
     """
     limit = _sc_spend_limit.get()
     bounds: Dict[str, Any] = {}
-    deadlines = [d for d in (deadline, limit.deadline if limit else None) if d is not None]
+    deadlines = [d for d in (
+        deadline,
+        limit.deadline if limit else None,
+        limit.return_deadline if limit else None,
+    ) if d is not None]
     if deadlines:
         bounds["deadline_monotonic"] = min(deadlines)
     if limit is not None and limit.cancel is not None:
@@ -803,6 +823,23 @@ def _clean_vtt(vtt_text: str) -> str:
 _YT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 
+def _read_transcript_url(req: urllib.request.Request, timeout: float) -> str:
+    deadline = _lane_deadline()
+    if deadline is None:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="replace")
+    if deadline <= time.monotonic():
+        raise TimeoutError("YouTube lane deadline passed")
+    limit = _sc_spend_limit.get()
+    _, body, error = bounded_get.get(
+        req, timeout=timeout, deadline_monotonic=deadline,
+        cancel=limit.cancel if limit else None, read_error_body=False,
+    )
+    if error is not None:
+        raise error
+    return (body or b"").decode("utf-8", errors="replace")
+
+
 def _fetch_transcript_direct(
     video_id: str,
     timeout: int = 30,
@@ -832,8 +869,7 @@ def _fetch_transcript_direct(
     # Step 1: Fetch the watch page HTML
     req = urllib.request.Request(watch_url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
+        html = _read_transcript_url(req, timeout)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as exc:
         _log(f"Direct transcript: failed to fetch watch page for {video_id}: {exc}")
         return None
@@ -896,8 +932,7 @@ def _fetch_transcript_direct(
     vtt_url = f"{base_url}{sep}fmt=vtt"
     vtt_req = urllib.request.Request(vtt_url, headers=headers)
     try:
-        with urllib.request.urlopen(vtt_req, timeout=timeout) as resp:
-            vtt_text = resp.read().decode("utf-8", errors="replace")
+        vtt_text = _read_transcript_url(vtt_req, timeout)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as exc:
         _log(f"Direct transcript: failed to fetch VTT for {video_id}: {exc}")
         return None
